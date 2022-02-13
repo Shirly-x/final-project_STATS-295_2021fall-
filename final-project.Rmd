@@ -1,0 +1,285 @@
+---
+title: Final Project
+
+blinded: 0
+
+authors: 
+- name: Shaolin Xiang
+  affiliation: Department of Statistics, University of California, Irvine
+
+keywords:
+- Imputation
+- Linear Regression
+- GEE
+
+abstract: |
+  The artical is mainly a report for the 2020's data analysis exam which analysed a longitudinal data to estimate whether Zidovudine can lower CD4 level or not. 
+  
+  The first step is wrangling data. The provided data consists 6 variables and except age and CD4 are integer, other variables are all factorial. The next step is to viasualize the data so that we can pre-estimate this data. There are plots showing CD4 against gender, age, treatment and time respectively. Also, there is a shadow plot indicating where the missing values distributed in our data. The author found that there are so many missings in CD4 that can cause great error in estimating the effect of Zidovudine afterwards. Then, based on information from the previous plots, the author built linear regression model for each patients and impute missings by the predicted value according to the model.
+  
+  Finally, by building linear regression model with interaction term and GEE model, the author draw a conclusion that Zidovudine does have a significant effect on lowering the level of CD4.
+
+bibliography: references.bib
+nocite: |
+  @naniar, @gee
+output: 
+  bookdown::pdf_document2: default
+---
+
+# Introduction
+
+For this final project, I'm going to study for qualifying exam. The data I'm going to work with is from 2020's data analysis exam, which is a longitudinal data evaluating the effect of Zidovudine on CD4 cell counts. Since the original questions need knowledge that I haven't learnt yet(like GEE and LME), so I will visualize data structure of the given data. Then I will impute missing value in CD4. After that, I will use my own method to analyze Zidovudine effect. At last I will try to learn generalized estimating equations and answer the first question(i.e. Using generalized estimating equations (GEE) with an appropriately chosen working correlation structure to quantify the effect of treatment with Zidovudine on the trajectory of CD4 counts over time.) raised in the qualifying exam.
+
+In this project, I self learnt 3 packages. Package `naniar` [@naniar] to visualize structure of missing data, `simputation` to impute missing values, `gee` [@gee] to estimate effect of Zidovudine.
+
+\section{Background}
+
+The given data is a longitudinal data comes from a study of Harvard AIDS clinical trial group. They evaluated the treatment effect of Zidovudine on CD4 cell counts, which represents the endpoint of HIV positive individuals-lower CD4 counts means shorter times to progress AIDS. I will work on a subset of this data that includes 265 patients' trail information. All individuals included in this subset had CD4 counts above 50 at baseline and longitudinal data on CD4 counts for 14 time points. Measurements were taken at approximately 1 month intervals. Patients might have intermittent missing or dropout with an overall missing rate of 20.2%.
+
+There are 6 variables in the data set: ID, Gender, Age, TRT, Time and CD4. ID is a unique number for each patient and Gender = M/F for male/female. Age is measured in years. TRT is a factor variable: TRT = 1 means the patient received the Zidovudine treatment while Trt = 0 means the patient received placebo. Time is a discrete variable counting from 1 to 14. CD4 represents the measured number for CD4 at each time point.
+
+\section{Data Wrangling}
+
+```{r, echo = FALSE, message = FALSE}
+library(tidyverse)
+library(janitor)
+library(ggplot2)
+library(visdat)
+library(naniar)
+library(simputation)
+library(knitr)
+library(kableExtra)
+library(gee)
+
+# import data
+data <- read_csv(here::here("data/data-analysis-2020.csv"))[,-1]
+data %>% 
+  glimpse() 
+```
+
+The original data is not in tidyverse style of naming variables. It also set Gender as character and other variables as double. Clearly, it is not appropriate. We need to transform these variables into tidyverse style and change their type manually.
+
+```{r tab1, echo = FALSE, message = FALSE, tab.cap="discriptive data"}
+# mutate data
+data <- data %>% 
+  clean_names() %>% 
+  mutate(gender = case_when(
+    gender == 'M' ~ 1,
+    gender == 'F' ~ 0)) %>% 
+  mutate(id = as.factor(id),
+         gender = as.factor(gender),
+         age = as.integer(age),
+         trt = as.factor(trt),
+         time = as.factor(time))
+data %>% 
+  summary() %>% 
+  knitr::kable(format = 'latex',
+             caption = "discriptive data")
+
+num_female <- data %>% 
+  filter(gender == 0) %>% 
+  count() %>% 
+  select(n)
+
+num_male <- data %>% 
+  filter(gender == 1) %>% 
+  count() %>% 
+  select(n)
+```
+
+First, we changed all columns name into lower case writing. Then, replace all values in gender by factor indicator 0 and 1. At last, set id, gender, trt, time as factor, age as integer. Then, briefly summarize the data, we have Table \@ref(tab:tab1). There are `r num_female` female patients and `r num_male` male patients participated in this survey.
+
+\section{Visualizing Data}
+
+Since we want to impute missing value of CD4, we need to find out what variable is correlated with it. In this part, we will use plot to detect relationship between CD4 and other variables.
+
+
+```{r fig1, echo=FALSE, message=FALSE, fig.cap="Violin plot on CD4 and gender"}
+# gender
+data %>% 
+  na.omit() %>% 
+  ggplot(aes(x = gender, y = cd4)) +
+    geom_violin(color = "#31a354", fill = "#e5f5e0") +
+    labs(title = "CD4 vs gender") +
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+Figure \@ref(fig:fig1) shows a violin plot of CD4 level in different gender. From the plot we can see that only men have higher CD4 while women don't. Recall the previous descriptive statistics table, this might because the data is biased: more men participated in the survey than women.
+
+```{r fig2, echo=FALSE, message=FALSE, fig.cap="Scatter plot on CD4 and age"}
+# age
+data %>% 
+  na.omit() %>% 
+  ggplot(aes(x = age, y = cd4)) +
+    geom_point(color = "#fdae6b") +
+    labs(title = "CD4 vs age") +
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+Figure \@ref(fig:fig2) is a scatter plot of age and CD4, which shows that the youngest patient is 12 years old and the eldest patient is 63 years old. Most patients are between 20 to 50 years old. Also, we can see there are extremely high CD4 that were shown in age 38 and 48. Patient under 20 or elder than 50 tend to have lower level of CD4.
+
+```{r fig3, echo=FALSE, message=FALSE, fig.cap="Box plot on CD4 and trt"}
+# trt
+data %>% 
+  na.omit() %>% 
+  ggplot(aes(x = trt, y = cd4)) +
+  geom_boxplot(color = "#3182bd", fill = "#deebf7") +
+    labs(title = "CD4 vs trt") +
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+The box plot in Figure \@ref(fig:fig3) shows that patients who receive placebo have a slightly higher CD4 in 1st quantile, mean and the 3rd quantile comparing to those who receive treatment. As for outliers, the two groups have almost the same maximum value, but except that, treatment group has a slightly smaller outliers than placebo group.
+
+```{r fig4, echo=FALSE, message=FALSE, fig.cap="Scatter plot on CD4 and time"}
+# time
+data %>% 
+  na.omit() %>% 
+  ggplot(aes(x = time, y = cd4)) +
+    geom_point(color = "#bcbddc") +
+    labs(title = "CD4 vs time") +
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+Figure \@ref(fig:fig4) shows all patients CD4 level at each time point. We can conclude from the plot that there is a decline in CD4 level with time passed. But we need further exploration to figure out reasons for this decline.
+
+```{r fig5, echo=FALSE, message=FALSE, fig.cap="Shadow plot of NAs"}
+# check NAs
+data %>% 
+  vis_dat(palette = 'cb_safe') +
+    labs(title = "Missings in each variable") +
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+Figure \@ref(fig:fig5) is a shadow plot showing where the missings distributed in each variable. Obviously, only CD4 has missing values, and there are many of them. The distribution of missings seems random, no obvious regular pattern.
+Only cd4 has NAs, and there are many of them, but seems like randomly distributed.
+
+Since having treatment or not and time has effect on CD4 level, and also missings are at a large amount, we then plot the relationship between these variables.
+
+```{r fig6,echo=FALSE, message=FALSE, warning=FALSE, fig.cap="plot of cd4"}
+data %>% 
+  mutate(trt = case_when(
+           trt == 0 ~ 'Placebo',
+           trt == 1 ~ 'Treatment')) %>% 
+  ggplot(aes(x = time, 
+             y = cd4)) + 
+    geom_miss_point() +
+    geom_jitter(alpha = .5, 
+                height = 0, 
+                width = .25) +
+    geom_boxplot(alpha = .25) +
+    facet_grid(trt~.) +
+    labs(title = "CD4 level vs time with missings in treatment and placebo group") +
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+Figure \@ref(fig:fig6) shows changes in CD4 with time of placebo group and treatment group. Though there is a obvious decrease in CD4 level in treatment group compare with placebo group, however, there is also a significant decline in the number of non-missing CD4 value. It is hard to say the decrease in CD4 of treatment group is the effect of Zidovudine or, instead, is due to those missing values in treatment group.
+
+
+\section{Imputation of Missing Values}
+
+We have known from previous analysis that the amount of missing value is large, which can deviate our estimation on the effect of Zidovudine. That is the reason why we are trying to impute them. After visualizing data structure, we found that missing values concentrate in the later period of the study and are more in treatment group than in placebo group. To impute missing CD4, we here use the `impute_lm` in the package `simputation`, which is using linear regression to impute missings. As for predictor in the model, we just put time in it. Then, the idea of imputation is: one patient's CD4 level is only related to himself. So we build liner regression model for every patient and impute their CD4 level separately.
+
+```{r echo=FALSE, message=FALSE}
+id_list <- as.vector(unique(data$id))
+data_impute <- data.frame(id = NA, gender = NA, age = NA, trt = NA, time = NA, cd4 = NA)
+dt <- cbind(data_impute, id_NA = NA, gender_NA = NA, age_NA = NA, trt_NA = NA, time_NA = NA, cd4_NA = NA)
+
+for (i in id_list){
+  dt1 <- subset(data, data$id == i) %>% 
+    mutate(time = as.numeric(time)) %>% 
+    bind_shadow() %>% 
+    as.data.frame() %>% 
+    impute_lm(cd4 ~ time) %>% 
+    select(colnames(data))
+  data_impute <- rbind(data_impute, dt1)
+  
+  dt2 <- subset(data, data$id == i) %>% 
+    mutate(time = as.numeric(time)) %>% 
+    bind_shadow() %>% 
+    as.data.frame() %>% 
+    impute_lm(cd4 ~ time)
+  dt <- rbind(dt, dt2)
+}
+
+data_impute <- data_impute[-1,]
+dt <- dt[-1,]
+```
+
+After imputed the missing value, we would like to know the distribution of those imputed values. It is shown in figure \@ref(fig:fig7). We can see from the plot that the decrease in CD4 level of treatment group is significant comparing to the placebo group. None of the patient in treatment group has CD4 higher than 500.
+
+```{r fig7,echo=FALSE, message=FALSE, warning=FALSE, fig.cap="plot of cd4 after imputation"}
+dt %>% 
+  mutate(time = as.factor(time),
+         trt = case_when(
+           trt == 0 ~ 'Placebo',
+           trt == 1 ~ 'Treatment')) %>% 
+  ggplot(aes(x = time, 
+             y = cd4,
+             color = cd4_NA)) + 
+  geom_point() +
+  geom_jitter(alpha = .5, 
+              height = 0, 
+              width = .25) +
+  geom_boxplot(alpha = .25) +
+  facet_grid(trt~.) +
+  labs(title="CD4 level vs time with imputed values")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Then, since we are curious about how Zidovudine behave in different age group, we compute the average value of each age group's CD4 level in both placebo group and treatment group. As is shown in figure \@ref(fig:fig8), comparing each age group's mean CD4 line, we can conclude that CD4 has significant effect on lowering CD4 level for patients age below 55. While for patients' age elder than 55, changing of mean CD4 is not obviously different between placebo group and treatment group.
+
+```{r fig8, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="plot of cd4 for different age group"}
+data_impute %>% 
+  mutate(time = as.factor(time),
+         age = case_when(
+           age <= 25 ~ '<=25',
+           age <= 35 ~ '25-35',
+           age <= 45 ~ '35-45',
+           age <= 55 ~ '45-55',
+           55 < age ~ '>55'),
+         trt = case_when(
+           trt == 0 ~ 'Placebo',
+           trt == 1 ~ 'Treatment')) %>% 
+  group_by(time, age, trt) %>% 
+  summarise(mean_cd4 = mean(cd4), .groups = 'drop') %>% 
+  ggplot(aes(x = time, 
+             y = mean_cd4,
+             group = age,
+             color = age)) + 
+  geom_point() +
+  geom_line()+
+  facet_grid(trt~.) +
+  labs(title="Mean CD4 level of different age group vs time", x="time", y="mean cd4")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+\section{Estimatee the Effect of Zidovudine}
+
+\subsection{Linear Regression Model}
+
+Now that we have imputed missings in x, we can begin building model to estimate the drug effect of Zidovudine. As is known from our previous analysis, CD4 level is relevent to treatment and time, so in the sense, by building a linear regression model with interaction term of treatment and time we can get the effect of Zidovudine.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+attach(data_impute)
+reg <- lm(cd4~time*trt)
+summary(reg)
+detach(data_impute)
+```
+
+We can derive the treatment effect from the output, which is the coefficient of the interaction term -3.7902. The t-statistics of this term shows the treatment effect over time is significant. Based on this, we can conclude that Zidovudine has a significant effect on reducing patients' CD4 level.
+
+\subsection{Generalized Estimating Equation Model}
+
+The qualifying exam requires using GEE model to estimate the effect of Zidovudine, though I have not learnt this model yet, I searched relative materials and learnt to utilize this model, here is my attempt:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+summary(gee(cd4 ~ time*trt, id=id, data=data_impute, corstr = "exchangeable"))
+```
+
+The result is quite similar with that of linear regression, with the same coefficient of interaction term and the robust z is -2.8871400, smaller than the 0.05 threshold, indicating the effect of treatment over time is fairly significant.
+
+\section{Summary}
+
+The given data is consists of 4 factorial variables, one integer and one numeric variable. But the numeric variable, which is our main target of analyzing drug effect has a large majority of missings. After building  linear regression model for each patient, we finally imputed those missing roughly. At last, by using linear regression model and generalized estimating equations, we came to the conclusion that drug effect of Zidovudine is very significant in reducing CD4 level.
+\newpage
+\section{Reference}
